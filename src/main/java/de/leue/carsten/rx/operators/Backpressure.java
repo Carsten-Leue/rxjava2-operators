@@ -44,6 +44,8 @@ public class Backpressure {
 	 * Creates a transformer that transforms a source stream into a target stream
 	 * using a mapper that can efficiently handle chunks of data
 	 * 
+	 * @param <T> - type of the upstream elements
+	 * @param <R> - type of the downstream elements
 	 * @param aMapper - the mapper than can handle chunks of data, efficiently
 	 * 
 	 * @return the resulting observable
