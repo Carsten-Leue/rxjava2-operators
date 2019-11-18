@@ -37,7 +37,7 @@ public class BackpressureTest {
 				.take(20);
 
 		final Function<Iterable<? extends Long>, Flowable<Long>> handler = (final Iterable<? extends Long> buf) -> {
-			System.out.println("buffer: " + buf);
+			System.out.println("buffer: " + buf + ", " + buf.getClass());
 			return Flowable.timer(500, TimeUnit.MILLISECONDS);
 		};
 

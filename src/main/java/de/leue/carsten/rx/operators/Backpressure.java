@@ -1,23 +1,41 @@
 package de.leue.carsten.rx.operators;
 
-import static java.util.Collections.singletonList;
-import static java.util.Collections.unmodifiableList;
-
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.reactivestreams.Publisher;
 
 import io.reactivex.BackpressureStrategy;
 import io.reactivex.Flowable;
 import io.reactivex.Observable;
-import io.reactivex.ObservableSource;
+import io.reactivex.Single;
 import io.reactivex.functions.Action;
 import io.reactivex.functions.Function;
 import io.reactivex.subjects.PublishSubject;
+import io.reactivex.subjects.Subject;
 
+/**
+ * Collection of back-pressure operators
+ * 
+ * @author CarstenLeue
+ *
+ */
 public class Backpressure {
+
+	/**
+	 * Simple pair holder
+	 */
+	private static class Pair {
+
+		private boolean bDone = false;
+		private Object data = EMPTY;
+	}
+
+	/**
+	 * Token that identifies the done state
+	 */
+	private static final Object DONE = new Object();
 
 	/**
 	 * Token that identifies the empty state
@@ -28,18 +46,6 @@ public class Backpressure {
 	 * Token that identifies the idle state
 	 */
 	private static final Object IDLE = new Object();
-
-	/**
-	 * Adds an element to an array and returns that array
-	 * 
-	 * @param aObj - new item
-	 * @param aDst - target array
-	 * @return the target array for convenience
-	 */
-	private static final <T> ArrayList<T> arrayPush(final T aObj, final ArrayList<T> aDst) {
-		aDst.add(aObj);
-		return aDst;
-	}
 
 	/**
 	 * Creates a transformer that transforms a source stream into a target stream
@@ -67,7 +73,11 @@ public class Backpressure {
 	 */
 	private static final <T, R> Flowable<R> createDeferredObservableSource(Observable<? extends T> aSrc$,
 			Function<? super List<? extends T>, ? extends Publisher<R>> aMapper) {
-		return Flowable.defer(() -> createObservableSource(aSrc$, aMapper));
+		// delegate
+		final Function<? super List<? extends T>, Flowable<R>> mapper = lst -> Flowable
+				.fromPublisher(aMapper.apply(Collections.unmodifiableList(lst)));
+		// dispatch
+		return Flowable.defer(() -> createObservableSource(aSrc$, mapper));
 	}
 
 	/**
@@ -80,16 +90,11 @@ public class Backpressure {
 	 */
 	@SuppressWarnings("unchecked")
 	private static final <T, R> Publisher<R> createObservableSource(final Observable<? extends T> aSrc$,
-			final Function<? super List<? extends T>, ? extends Publisher<R>> aMapper) {
-		/**
-		 * Flag to check if the source sequence is done. We need this to potentially
-		 * flush the final buffer.
-		 */
-		final AtomicBoolean bDone = new AtomicBoolean(false);
+			final Function<? super List<? extends T>, Flowable<R>> aMapper) {
 		/**
 		 * Source sequence setting the done flag when it completes
 		 */
-		final Observable<? extends T> obj$ = aSrc$.doFinally(() -> bDone.set(true));
+		final Observable<Object> obj$ = ((Observable<Object>) aSrc$).concatWith(Single.just(DONE));
 		/**
 		 * Triggers when the generated downstream sequence has terminated
 		 */
@@ -97,9 +102,6 @@ public class Backpressure {
 
 		// signal that downstream is idle
 		final Action finalAction = () -> idle$.onNext(IDLE);
-
-		// shortcut
-		final Function<Object, ? extends Flowable<R>> toFlowable = Backpressure::toFlowable;
 
 		/**
 		 * We merge the original events and the events that tell about downstream
@@ -114,50 +116,15 @@ public class Backpressure {
 				 * if a buffer, downstream is busy and we already have a buffered item - if an
 				 * observable, downstream is busy but there is no buffered item, yet
 				 */
-				.scan(EMPTY, (final Object acc, final Object obj) -> {
-					/**
-					 * The idle event indicates that downstream had been busy but is idle, now
-					 */
-					if (isIdle(obj)) {
-						/**
-						 * if there is data in the buffer, process downstream and reset the buffer
-						 */
-						if (isBuffer(acc)) {
-							// process the next chunk of data
-							return aMapper.apply(unmodifiableList((List<? extends T>) acc));
-						}
-						/**
-						 * Check if the sequence is done
-						 */
-						if (bDone.get()) {
-							/**
-							 * nothing to process, but source is done. Also complete the backpressure stream
-							 */
-							idle$.onComplete();
-						}
-						// nothing to return
-						return EMPTY;
-					}
-					// we have a buffer, append to it
-					if (isBuffer(acc)) {
-						return arrayPush((T) obj, (ArrayList<T>) acc);
-					}
-					// we have a running observable, start a new buffer
-					if (isNotNil(acc)) {
-						// downstream is busy, start buffering
-						return newBuffer((T) obj);
-					}
-					// downstream is idle
-					return aMapper.apply(singletonList((T) obj));
-				})
+				.scan(new Pair(), (final Pair pair, final Object obj) -> reducePair(pair, obj, aMapper, idle$))
+				// extract the data
+				.map(pair -> pair.data)
 				// only continue if we have new work
 				.filter(Backpressure::isBusy)
 				// convert to flowable without extra backpressure
 				.toFlowable(BackpressureStrategy.ERROR)
-				// construct an observable source
-				.map(toFlowable)
 				// append the resulting items and make sure we get notified about the readiness
-				.concatMap(res$ -> res$.doFinally(finalAction));
+				.concatMap(res$ -> ((Flowable<R>) res$).doFinally(finalAction));
 
 	}
 
@@ -183,44 +150,106 @@ public class Backpressure {
 	}
 
 	/**
-	 * Tests if the object is the idle token
+	 * Reducer implementation
 	 * 
-	 * @param aValue - value to check
-	 * @return <code>true</code> if we have the idle token, else <code>false</code>
-	 */
-	private static final boolean isIdle(final Object aValue) {
-		return aValue == IDLE;
-	}
-
-	/**
-	 * Checks if we have a non-empty object
+	 * @param <T>     type of the source sequence
+	 * @param <R>     type of the target sequence
+	 * @param pair    current state
+	 * @param obj     input object, either the original object or the done indicator
+	 * @param aMapper mapper callback
+	 * @param aIdle$
+	 * @return
 	 * 
-	 * @param aValue - value to check
-	 * @return <code>true</code> if the value is not empty, else <code>false</code>
-	 */
-	private static final boolean isNotNil(final Object aValue) {
-		return aValue != EMPTY;
-	}
-
-	/**
-	 * Constructs a new list and adds a value to it
-	 * 
-	 * @param aValue - the value
-	 * @return the new buffer
-	 */
-	private static final <T> ArrayList<T> newBuffer(final T aValue) {
-		return arrayPush(aValue, new ArrayList<T>());
-	}
-
-	/**
-	 * Converts an {@link ObservableSource} to an {@link Observable}.
-	 * 
-	 * @param aValue - the value to check
-	 * @return the resulting {@link Observable}
+	 * @throws Exception
 	 */
 	@SuppressWarnings("unchecked")
-	private static final <R> Flowable<R> toFlowable(final Object aValue) {
-		return Flowable.fromPublisher((Publisher<R>) aValue);
+	private static final <T, R> Pair reducePair(final Pair pair, final Object obj,
+			final Function<? super List<? extends T>, Flowable<R>> aMapper, final Subject<Object> aIdle$)
+			throws Exception {
+		/**
+		 * Extract some state
+		 * 
+		 */
+		Object data = pair.data;
+		final boolean bDone = pair.bDone;
+		/**
+		 * The idle event indicates that downstream had been busy but is idle, now
+		 */
+		if (obj == IDLE) {
+			/**
+			 * if there is data in the buffer, process downstream and reset the buffer
+			 */
+			if (isBuffer(data)) {
+				/**
+				 * Process the buffer
+				 */
+				data = aMapper.apply((ArrayList<T>) data);
+			} else {
+				/**
+				 * Check if the sequence is done
+				 */
+				if (bDone) {
+					/**
+					 * nothing to process, but source is done. Also complete the backpressure stream
+					 */
+					aIdle$.onComplete();
+				}
+				// reset
+				data = EMPTY;
+			}
+		} else
+		/**
+		 * The done event indicates that the source closed
+		 */
+		if (obj == DONE) {
+			/**
+			 * Set the done flag
+			 */
+			pair.bDone = true;
+			/**
+			 * if there is data in the buffer, process downstream and reset the buffer
+			 */
+			if (isBuffer(data)) {
+				/**
+				 * Process the buffer
+				 */
+				data = aMapper.apply((ArrayList<T>) data);
+			} else {
+				/**
+				 * Check if the sequence is done
+				 */
+				if (data == EMPTY) {
+					/**
+					 * nothing to process, but source is done. Also complete the backpressure stream
+					 */
+					aIdle$.onComplete();
+				}
+				// reset
+				data = EMPTY;
+			}
+		} else
+		// we have a buffer, append to it
+		if (isBuffer(data)) {
+			// append to the buffer
+			((ArrayList<T>) data).add((T) obj);
+		} else
+		// downstream is idle
+		if (data == EMPTY) {
+			// process the single item buffer
+			data = aMapper.apply(Collections.singletonList((T) obj));
+		} else {
+			// we have a running observable, start a new buffer
+			final ArrayList<T> buffer = new ArrayList<>();
+			buffer.add((T) obj);
+			// start a new chunk
+			data = buffer;
+		}
+		// continue
+		pair.data = data;
+		return pair;
+	}
+
+	private Backpressure() {
 	}
 
 }
