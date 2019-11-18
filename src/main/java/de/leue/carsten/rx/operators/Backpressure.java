@@ -1,6 +1,7 @@
 package de.leue.carsten.rx.operators;
 
 import static java.util.Collections.singletonList;
+import static java.util.Collections.unmodifiableList;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -52,7 +53,7 @@ public class Backpressure {
 	 * @see Observable#to(Function)
 	 */
 	public static final <T, R> Function<? super Observable<? extends T>, Flowable<R>> chunkedBackpressure(
-			Function<? super Iterable<? extends T>, ? extends Publisher<R>> aMapper) {
+			Function<? super List<? extends T>, ? extends Publisher<R>> aMapper) {
 		return (final Observable<? extends T> src$) -> createDeferredObservableSource(src$, aMapper);
 	}
 
@@ -65,7 +66,7 @@ public class Backpressure {
 	 * @return the resulting observable
 	 */
 	private static final <T, R> Flowable<R> createDeferredObservableSource(Observable<? extends T> aSrc$,
-			Function<? super Iterable<? extends T>, ? extends Publisher<R>> aMapper) {
+			Function<? super List<? extends T>, ? extends Publisher<R>> aMapper) {
 		return Flowable.defer(() -> createObservableSource(aSrc$, aMapper));
 	}
 
@@ -79,7 +80,7 @@ public class Backpressure {
 	 */
 	@SuppressWarnings("unchecked")
 	private static final <T, R> Publisher<R> createObservableSource(final Observable<? extends T> aSrc$,
-			final Function<? super Iterable<? extends T>, ? extends Publisher<R>> aMapper) {
+			final Function<? super List<? extends T>, ? extends Publisher<R>> aMapper) {
 		/**
 		 * Flag to check if the source sequence is done. We need this to potentially
 		 * flush the final buffer.
@@ -123,7 +124,7 @@ public class Backpressure {
 						 */
 						if (isBuffer(acc)) {
 							// process the next chunk of data
-							return aMapper.apply((List<? extends T>) acc);
+							return aMapper.apply(unmodifiableList((List<? extends T>) acc));
 						}
 						/**
 						 * Check if the sequence is done
