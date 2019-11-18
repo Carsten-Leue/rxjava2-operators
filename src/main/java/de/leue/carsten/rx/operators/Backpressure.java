@@ -6,9 +6,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.reactivestreams.Publisher;
+
+import io.reactivex.BackpressureStrategy;
+import io.reactivex.Flowable;
 import io.reactivex.Observable;
 import io.reactivex.ObservableSource;
-import io.reactivex.ObservableTransformer;
 import io.reactivex.functions.Action;
 import io.reactivex.functions.Function;
 import io.reactivex.subjects.PublishSubject;
@@ -16,45 +19,14 @@ import io.reactivex.subjects.PublishSubject;
 public class Backpressure {
 
 	/**
-	 * Token that identifies the idle state
-	 */
-	private static final Object IDLE = new Object();
-
-	/**
 	 * Token that identifies the empty state
 	 */
 	private static final Object EMPTY = new Object();
 
 	/**
-	 * Tests if the object is the idle token
-	 * 
-	 * @param aValue - value to check
-	 * @return <code>true</code> if we have the idle token, else <code>false</code>
+	 * Token that identifies the idle state
 	 */
-	private static final boolean isIdle(final Object aValue) {
-		return aValue == IDLE;
-	}
-
-	/**
-	 * Checks if the object is a buffer
-	 * 
-	 * @param aValue - value to check
-	 * @return <code>true</code> if we have a buffer, else <code>false</code>
-	 */
-	private static final boolean isBuffer(final Object aValue) {
-		return aValue instanceof ArrayList<?>;
-	}
-
-	/**
-	 * Checks if we have some downstream handler running
-	 * 
-	 * @param aValue - value to check
-	 * @return <code>true</code> if we have an observable source, else
-	 *         <code>false</code>
-	 */
-	private static final boolean isBusy(final Object aValue) {
-		return aValue instanceof ObservableSource<?>;
-	}
+	private static final Object IDLE = new Object();
 
 	/**
 	 * Adds an element to an array and returns that array
@@ -69,48 +41,43 @@ public class Backpressure {
 	}
 
 	/**
-	 * Checks if we have a non-empty object
+	 * Creates a transformer that transforms a source stream into a target stream
+	 * using a mapper that can efficiently handle chunks of data
 	 * 
-	 * @param aValue - value to check
-	 * @return <code>true</code> if the value is not empty, else <code>false</code>
+	 * @param aMapper - the mapper than can handle chunks of data, efficiently
+	 * 
+	 * @return the resulting observable
+	 * @see Observable#to(Function)
 	 */
-	private static final boolean isNotNil(final Object aValue) {
-		return aValue != EMPTY;
+	public static final <T, R> Function<? super Observable<? extends T>, Flowable<R>> chunkedBackpressure(
+			Function<? super Iterable<? extends T>, ? extends Publisher<R>> aMapper) {
+		return (final Observable<? extends T> src$) -> createDeferredObservableSource(src$, aMapper);
 	}
 
 	/**
-	 * Constructs a new list and adds a value to it
+	 * The defer wrapper so we can safely keep function level state
 	 * 
-	 * @param aValue - the value
-	 * @return the new buffer
-	 */
-	private static final <T> ArrayList<T> newBuffer(final T aValue) {
-		return arrayPush(aValue, new ArrayList<T>());
-	}
-
-	/**
-	 * Converts an {@link ObservableSource} to an {@link Observable}.
+	 * @param aSrc$   - the source sequence
+	 * @param aMapper - the mapper than can handle chunks of data, efficiently
 	 * 
-	 * @param aValue - the value to check
-	 * @return the resulting {@link Observable}
+	 * @return the resulting observable
 	 */
-	@SuppressWarnings("unchecked")
-	private static final <R> Observable<? extends R> toObservable(final Object aValue) {
-		return (aValue instanceof Observable<?>) ? (Observable<? extends R>) aValue
-				: Observable.unsafeCreate((ObservableSource<? extends R>) aValue);
+	private static final <T, R> Flowable<R> createDeferredObservableSource(Observable<? extends T> aSrc$,
+			Function<? super Iterable<? extends T>, ? extends Publisher<R>> aMapper) {
+		return Flowable.defer(() -> createObservableSource(aSrc$, aMapper));
 	}
 
 	/**
 	 * Converts a source sequence into a target sequence using a chunk mapper
 	 * 
-	 * @param aSrc$	- the source sequence
+	 * @param aSrc$   - the source sequence
 	 * @param aMapper - the mapper than can handle chunks of data, efficiently
 	 * 
 	 * @return the resulting observable
 	 */
 	@SuppressWarnings("unchecked")
-	private static final <T, R> ObservableSource<R> createObservableSource(final Observable<? extends T> aSrc$,
-			final Function<? super Iterable<? extends T>, ? extends ObservableSource<? extends R>> aMapper) {
+	private static final <T, R> Publisher<R> createObservableSource(final Observable<? extends T> aSrc$,
+			final Function<? super Iterable<? extends T>, ? extends Publisher<R>> aMapper) {
 		/**
 		 * Flag to check if the source sequence is done. We need this to potentially
 		 * flush the final buffer.
@@ -129,7 +96,7 @@ public class Backpressure {
 		final Action finalAction = () -> idle$.onNext(IDLE);
 
 		// shortcut
-		final Function<Object, ? extends Observable<? extends R>> toObservable = Backpressure::toObservable;
+		final Function<Object, ? extends Flowable<R>> toFlowable = Backpressure::toFlowable;
 
 		/**
 		 * We merge the original events and the events that tell about downstream
@@ -181,38 +148,76 @@ public class Backpressure {
 					return aMapper.apply(singletonList((T) obj));
 				})
 				// only continue if we have new work
-				.filter(Backpressure::isBusy)
+				.filter(Backpressure::isBusy)				
+				// convert to flowable without extra backpressure
+				.toFlowable(BackpressureStrategy.ERROR)
 				// construct an observable source
-				.map(toObservable)
+				.map(toFlowable)
 				// append the resulting items and make sure we get notified about the readiness
 				.concatMap(res$ -> res$.doFinally(finalAction));
 
 	}
 
 	/**
-	 * The defer wrapper so we can safely keep function level state
+	 * Checks if the object is a buffer
 	 * 
-	 * @param aSrc$	- the source sequence
-	 * @param aMapper - the mapper than can handle chunks of data, efficiently
-	 * 
-	 * @return the resulting observable
+	 * @param aValue - value to check
+	 * @return <code>true</code> if we have a buffer, else <code>false</code>
 	 */
-	private static final <T, R> ObservableSource<R> createDeferredObservableSource(Observable<? extends T> aSrc$,
-			Function<? super Iterable<? extends T>, ? extends Observable<? extends R>> aMapper) {
-		return Observable.defer(() -> createObservableSource(aSrc$, aMapper));
+	private static final boolean isBuffer(final Object aValue) {
+		return aValue instanceof ArrayList<?>;
 	}
 
 	/**
-	 * Creates a transformer that transforms a source stream into a target stream using a 
-	 * mapper that can efficiently handle chunks of data
-	 *  
-	 * @param aMapper - the mapper than can handle chunks of data, efficiently
+	 * Checks if we have some downstream handler running
 	 * 
-	 * @return the resulting observable
+	 * @param aValue - value to check
+	 * @return <code>true</code> if we have an observable source, else
+	 *         <code>false</code>
 	 */
-	public static final <T, R> ObservableTransformer<T, R> chunkedBackpressure(
-			Function<? super Iterable<? extends T>, ? extends Observable<? extends R>> aMapper) {
-		return (final Observable<T> src$) -> createDeferredObservableSource(src$, aMapper);
+	private static final boolean isBusy(final Object aValue) {
+		return aValue instanceof Publisher<?>;
+	}
+
+	/**
+	 * Tests if the object is the idle token
+	 * 
+	 * @param aValue - value to check
+	 * @return <code>true</code> if we have the idle token, else <code>false</code>
+	 */
+	private static final boolean isIdle(final Object aValue) {
+		return aValue == IDLE;
+	}
+
+	/**
+	 * Checks if we have a non-empty object
+	 * 
+	 * @param aValue - value to check
+	 * @return <code>true</code> if the value is not empty, else <code>false</code>
+	 */
+	private static final boolean isNotNil(final Object aValue) {
+		return aValue != EMPTY;
+	}
+
+	/**
+	 * Constructs a new list and adds a value to it
+	 * 
+	 * @param aValue - the value
+	 * @return the new buffer
+	 */
+	private static final <T> ArrayList<T> newBuffer(final T aValue) {
+		return arrayPush(aValue, new ArrayList<T>());
+	}
+
+	/**
+	 * Converts an {@link ObservableSource} to an {@link Observable}.
+	 * 
+	 * @param aValue - the value to check
+	 * @return the resulting {@link Observable}
+	 */
+	@SuppressWarnings("unchecked")
+	private static final <R> Flowable<R> toFlowable(final Object aValue) {
+		return (aValue instanceof Flowable<?>) ? (Flowable<R>) aValue : Flowable.unsafeCreate((Publisher<R>) aValue);
 	}
 
 }
