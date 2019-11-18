@@ -44,8 +44,8 @@ public class Backpressure {
 	 * Creates a transformer that transforms a source stream into a target stream
 	 * using a mapper that can efficiently handle chunks of data
 	 * 
-	 * @param <T> - type of the upstream elements
-	 * @param <R> - type of the downstream elements
+	 * @param <T>     - type of the upstream elements
+	 * @param <R>     - type of the downstream elements
 	 * @param aMapper - the mapper than can handle chunks of data, efficiently
 	 * 
 	 * @return the resulting observable
@@ -150,7 +150,7 @@ public class Backpressure {
 					return aMapper.apply(singletonList((T) obj));
 				})
 				// only continue if we have new work
-				.filter(Backpressure::isBusy)				
+				.filter(Backpressure::isBusy)
 				// convert to flowable without extra backpressure
 				.toFlowable(BackpressureStrategy.ERROR)
 				// construct an observable source
@@ -219,7 +219,7 @@ public class Backpressure {
 	 */
 	@SuppressWarnings("unchecked")
 	private static final <R> Flowable<R> toFlowable(final Object aValue) {
-		return (aValue instanceof Flowable<?>) ? (Flowable<R>) aValue : Flowable.unsafeCreate((Publisher<R>) aValue);
+		return Flowable.fromPublisher((Publisher<R>) aValue);
 	}
 
 }
